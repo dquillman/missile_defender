@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Missile Defender</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #111;
+            font-family: 'Courier New', Courier, monospace;
+            color: #fff;
+            user-select: none;
+        }
+
+        #gameCanvas {
+            display: block;
+            margin: 0 auto;
+            background-color: #000;
+            cursor: crosshair;
+            border-bottom: 4px solid #333;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 0;
+            width: 100%;
+            pointer-events: none; /* Let clicks pass through to canvas */
+            text-align: center;
+        }
+
+        .hud-item {
+            display: inline-block;
+            margin: 0 20px;
+            font-size: 20px;
+            font-weight: bold;
+            text-shadow: 0 0 5px #fff;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 40px;
+            border: 2px solid #fff;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        button {
+            background: #f00;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 18px;
+            font-family: inherit;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-weight: bold;
+        }
+
+        button:hover {
+            background: #ff4444;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="hud-item">SCORE: <span id="scoreEl">0</span></div>
+        <div class="hud-item">LEVEL: <span id="levelEl">1</span></div>
+        <div class="hud-item" style="color: yellow;">AMMO: <span id="ammoEl">30</span></div>
+    </div>
+
+    <div id="overlay">
+        <h1 id="titleEl">MISSILE DEFENDER</h1>
+        <p id="descEl">Protect your cities from incoming attacks.</p>
+        <button id="startBtn">Start Game</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    /** 
+     * GAME CONFIGURATION 
+     */
+    const CONFIG = {
+        cityCount: 6,
+        missileSpeed: 5,     // Player missile speed
+        enemySpeedBase: 0.5, // Enemy base speed
+        explosionRadius: 40,
+        explosionGrowSpeed: 1,
+        ammoPerLevel: 30,
+        colors: {
+            bg: '#000010',
+            ground: '#332200',
+            city: '#0088ff',
+            playerTrail: '#00ff00',
+            playerHead: '#fff',
+            enemyTrail: '#ff0000',
+            enemyHead: '#ffff00',
+            explosion: '#ffffff'
+        }
+    };
+
+    /**
+     * SETUP CANVAS
+     */
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // UI Elements
+    const scoreEl = document.getElementById('scoreEl');
+    const levelEl = document.getElementById('levelEl');
+    const ammoEl = document.getElementById('ammoEl');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('startBtn');
+    const titleEl = document.getElementById('titleEl');
+    const descEl = document.getElementById('descEl');
+
+    let width, height;
+
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    /**
+     * GAME STATE
+     */
+    let state = {
+        isRunning: false,
+        score: 0,
+        level: 1,
+        ammo: 0,
+        cities: [],
+        playerMissiles: [],
+        enemyMissiles: [],
+        explosions: [],
+        lastEnemySpawn: 0,
+        enemiesToSpawn: 0,
+        isLevelTransition: false
+    };
+
+    /**
+     * CLASSES
+     */
+
+    class Vector {
+        constructor(x, y) { this.x = x; this.y = y; }
+    }
+
+    class City {
+        constructor(x) {
+            this.x = x;
+            this.y = height - 30;
+            this.width = 40;
+            this.height = 20;
+            this.active = true;
+        }
+
+        draw() {
+            if (!this.active) return;
+            ctx.fillStyle = CONFIG.colors.city;
+            // Draw a dome shape
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 20, Math.PI, 0);
+            ctx.fill();
+        }
+    }
+
+    class Explosion {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.radius = 1;
+            this.maxRadius = CONFIG.explosionRadius;
+            this.growing = true;
+            this.active = true;
+        }
+
+        update() {
+            if (this.growing) {
+                this.radius += CONFIG.explosionGrowSpeed;
+                if (this.radius >= this.maxRadius) this.growing = false;
+            } else {
+                this.radius -= CONFIG.explosionGrowSpeed * 0.5;
+                if (this.radius <= 0) this.active = false;
+            }
+        }
+
+        draw() {
+            ctx.fillStyle = `rgba(255, 255, 255, ${this.radius / this.maxRadius})`;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    class Missile {
+        constructor(startX, startY, targetX, targetY, speed, colorTrail) {
+            this.start = new Vector(startX, startY);
+            this.current = new Vector(startX, startY);
+            this.target = new Vector(targetX, targetY);
+            this.speed = speed;
+            this.active = true;
+            this.colorTrail = colorTrail;
+            
+            // Calculate velocity
+            const dx = targetX - startX;
+            const dy = targetY - startY;
+            const dist = Math.hypot(dx, dy);
+            this.vx = (dx / dist) * speed;
+            this.vy = (dy / dist) * speed;
+        }
+
+        update() {
+            this.current.x += this.vx;
+            this.current.y += this.vy;
+
+            // Check if reached target (simple distance check)
+            const distToTarget = Math.hypot(this.target.x - this.current.x, this.target.y - this.current.y);
+            
+            if (distToTarget < this.speed) {
+                this.active = false;
+                return true; // Reached target
+            }
+            return false;
+        }
+
+        draw() {
+            ctx.strokeStyle = this.colorTrail;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(this.start.x, this.start.y);
+            ctx.lineTo(this.current.x, this.current.y);
+            ctx.stroke();
+
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(this.current.x - 1, this.current.y - 1, 3, 3);
+        }
+    }
+
+    /**
+     * GAME LOGIC
+     */
+
+    function initGame() {
+        state.score = 0;
+        state.level = 1;
+        state.cities = [];
+        
+        // Create cities distributed evenly
+        const gap = width / (CONFIG.cityCount + 1);
+        for(let i=1; i<=CONFIG.cityCount; i++) {
+            state.cities.push(new City(gap * i));
+        }
+
+        startLevel();
+    }
+
+    function startLevel() {
+        state.ammo = CONFIG.ammoPerLevel;
+        state.playerMissiles = [];
+        state.enemyMissiles = [];
+        state.explosions = [];
+        state.enemiesToSpawn = 8 + (state.level * 2); // Increase enemies per level
+        state.isLevelTransition = false;
+        state.lastEnemySpawn = 0;
+        
+        updateUI();
+    }
+
+    function spawnEnemy() {
+        // Pick a random city or general ground area to target
+        let targetX;
+        const livingCities = state.cities.filter(c => c.active);
+        
+        if (livingCities.length > 0 && Math.random() > 0.3) {
+            const city = livingCities[Math.floor(Math.random() * livingCities.length)];
+            targetX = city.x;
+        } else {
+            targetX = Math.random() * width;
+        }
+
+        const startX = Math.random() * width;
+        const speed = CONFIG.enemySpeedBase + (state.level * 0.1); // Slightly faster per level
+
+        state.enemyMissiles.push(new Missile(
+            startX, 0, 
+            targetX, height, 
+            speed, 
+            CONFIG.colors.enemyTrail
+        ));
+    }
+
+    function shoot(x, y) {
+        if (state.ammo <= 0 || state.isLevelTransition) return;
+        
+        // Spawn from center bottom
+        const startX = width / 2;
+        const startY = height - 20;
+
+        state.playerMissiles.push(new Missile(
+            startX, startY,
+            x, y,
+            CONFIG.missileSpeed,
+            CONFIG.colors.playerTrail
+        ));
+
+        state.ammo--;
+        updateUI();
+    }
+
+    function checkCollisions() {
+        // 1. Explosions vs Enemy Missiles
+        state.explosions.forEach(exp => {
+            state.enemyMissiles.forEach(enemy => {
+                if (!enemy.active) return;
+                const dist = Math.hypot(enemy.current.x - exp.x, enemy.current.y - exp.y);
+                if (dist < exp.radius) {
+                    enemy.active = false;
+                    state.score += 25 * state.level;
+                    // Chain reaction? Maybe just small graphical effect.
+                    // Let's create a small explosion where the enemy died
+                    state.explosions.push(new Explosion(enemy.current.x, enemy.current.y));
+                }
+            });
+        });
+
+        // 2. Enemy Missiles vs Cities / Ground
+        state.enemyMissiles.forEach(enemy => {
+            if (!enemy.active) return;
+
+            // Hit ground level
+            if (enemy.current.y >= height - 35) {
+                enemy.active = false;
+                state.explosions.push(new Explosion(enemy.current.x, enemy.current.y));
+
+                // Check city hit
+                state.cities.forEach(city => {
+                    if (city.active && Math.abs(city.x - enemy.current.x) < 30) {
+                        city.active = false;
+                    }
+                });
+            }
+        });
+    }
+
+    function checkLevelStatus() {
+        // Check Game Over
+        if (state.cities.filter(c => c.active).length === 0) {
+            gameOver();
+            return;
+        }
+
+        // Check End of Level
+        if (state.enemiesToSpawn === 0 && state.enemyMissiles.filter(m => m.active).length === 0 && state.explosions.length === 0) {
+            if (!state.isLevelTransition) {
+                state.isLevelTransition = true;
+                setTimeout(() => {
+                    // Bonus points for ammo and cities
+                    state.score += state.ammo * 5;
+                    state.score += state.cities.filter(c => c.active).length * 100;
+                    state.level++;
+                    startLevel();
+                }, 2000);
+            }
+        }
+    }
+
+    function gameOver() {
+        state.isRunning = false;
+        titleEl.innerText = "GAME OVER";
+        descEl.innerText = `Final Score: ${state.score}\nReaching Level ${state.level}`;
+        startBtn.innerText = "Play Again";
+        overlay.classList.remove('hidden');
+    }
+
+    function updateUI() {
+        scoreEl.innerText = state.score;
+        levelEl.innerText = state.level;
+        ammoEl.innerText = state.ammo;
+    }
+
+    function update(timestamp) {
+        if (!state.isRunning) return;
+
+        ctx.fillStyle = CONFIG.colors.bg;
+        ctx.fillRect(0, 0, width, height);
+
+        // Draw Ground
+        ctx.fillStyle = CONFIG.colors.ground;
+        ctx.fillRect(0, height - 20, width, 20);
+
+        // Draw Battery
+        ctx.fillStyle = 'gray';
+        ctx.beginPath();
+        ctx.moveTo(width/2 - 20, height-20);
+        ctx.lineTo(width/2, height-50);
+        ctx.lineTo(width/2 + 20, height-20);
+        ctx.fill();
+
+        // Spawn Enemies
+        if (state.enemiesToSpawn > 0 && !state.isLevelTransition) {
+            // Spawn rate
+            if (timestamp - state.lastEnemySpawn > 2000 / (1 + (state.level * 0.2))) {
+                spawnEnemy();
+                state.enemiesToSpawn--;
+                state.lastEnemySpawn = timestamp;
+            }
+        }
+
+        // Update & Draw Cities
+        state.cities.forEach(city => city.draw());
+
+        // Update & Draw Player Missiles
+        state.playerMissiles = state.playerMissiles.filter(m => m.active);
+        state.playerMissiles.forEach(m => {
+            if (m.update()) {
+                // Reached target -> Explode
+                state.explosions.push(new Explosion(m.target.x, m.target.y));
+            }
+            m.draw();
+        });
+
+        // Update & Draw Enemy Missiles
+        state.enemyMissiles = state.enemyMissiles.filter(m => m.active);
+        state.enemyMissiles.forEach(m => {
+            m.update();
+            m.draw();
+        });
+
+        // Update & Draw Explosions
+        state.explosions = state.explosions.filter(e => e.active);
+        state.explosions.forEach(e => {
+            e.update();
+            e.draw();
+        });
+
+        checkCollisions();
+        checkLevelStatus();
+        updateUI(); // Keep score fresh
+
+        requestAnimationFrame(update);
+    }
+
+    /**
+     * INPUT HANDLING
+     */
+    canvas.addEventListener('mousedown', (e) => {
+        if (!state.isRunning) return;
+        shoot(e.clientX, e.clientY);
+    });
+
+    startBtn.addEventListener('click', () => {
+        overlay.classList.add('hidden');
+        state.isRunning = true;
+        initGame();
+        requestAnimationFrame(update);
+    });
+
+</script>
+</body>
+</html>
